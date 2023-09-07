@@ -16,6 +16,7 @@ using MGroup.FEM.Structural.Helpers;
 using MGroup.MSolve.DataStructures;
 using MGroup.MSolve.Constitutive;
 using MGroup.LinearAlgebra.Providers;
+using MGroup.Constitutive.Structural.Transient;
 
 namespace MGroup.FEM.Structural.Continuum
 {
@@ -29,6 +30,8 @@ namespace MGroup.FEM.Structural.Continuum
 		protected readonly IDofType[][] dofTypes;
 		protected readonly IContinuumMaterial3DDefGrad[] materialsAtGaussPoints;
 		protected IElementDofEnumerator dofEnumerator = new GenericDofEnumerator();
+		private ITransientAnalysisProperties dynamicProperties;
+
 
 		private readonly int nGaussPoints;
 		private bool isInitialized = false;
@@ -43,8 +46,13 @@ namespace MGroup.FEM.Structural.Continuum
 		private double lambdag = 1;
 
 		public ContinuumElement3DGrowth(IReadOnlyList<INode> nodes, IContinuumMaterial3DDefGrad material, IQuadrature3D quadratureForStiffness,
-			 IIsoparametricInterpolation3D interpolation, double lambdag = 1)
+			 IIsoparametricInterpolation3D interpolation,
+			 ITransientAnalysisProperties dynamicProperties,
+			 IQuadrature3D quadratureForMass, double lambdag = 1)
 		{
+			this.QuadratureForConsistentMass = quadratureForMass;
+			this.dynamicProperties = dynamicProperties;
+
 			this.nGaussPoints = quadratureForStiffness.IntegrationPoints.Count;
 			this.QuadratureForStiffness = quadratureForStiffness;
 			this.Interpolation = interpolation;
@@ -78,6 +86,8 @@ namespace MGroup.FEM.Structural.Continuum
 		public CellType CellType => Interpolation.CellType;
 
 		public ElementDimensions ElementDimensions => ElementDimensions.ThreeD;
+
+		public bool UseConsistentMass { get; set; } = true;
 
 		public IElementDofEnumerator DofEnumerator
 		{
@@ -826,18 +836,145 @@ namespace MGroup.FEM.Structural.Continuum
 
 		public virtual IMatrix MassMatrix()
 		{
-			throw new NotImplementedException();
+			return (UseConsistentMass ? BuildConsistentMassMatrix() : BuildLumpedMassMatrix());
 		}
 
-		public virtual IMatrix DampingMatrix()
+		public Matrix BuildLumpedMassMatrix()
 		{
-			throw new NotImplementedException();
+			int numberOfDofs = 3 * Nodes.Count;
+			var lumpedMass = Matrix.CreateZero(numberOfDofs, numberOfDofs);
+			IReadOnlyList<Matrix> shapeGradientsNatural =
+				Interpolation.EvaluateNaturalGradientsAtGaussPoints(QuadratureForConsistentMass);
+
+			double area = 0;
+			for (int gp = 0; gp < QuadratureForConsistentMass.IntegrationPoints.Count; ++gp)
+			{
+				var jacobian = new IsoparametricJacobian3D(Nodes, shapeGradientsNatural[gp]);
+				area += jacobian.DirectDeterminant * QuadratureForConsistentMass.IntegrationPoints[gp].Weight;
+			}
+
+			double nodalMass = area * dynamicProperties.Density / Nodes.Count;
+			for (int i = 0; i < numberOfDofs; i++) lumpedMass[i, i] = nodalMass;
+
+			return lumpedMass;
+		}
+
+		public Matrix BuildConsistentMassMatrix()
+		{
+			int numberOfDofs = 3 * Nodes.Count;
+			var mass = Matrix.CreateZero(numberOfDofs, numberOfDofs);
+			IReadOnlyList<double[]> shapeFunctions =
+				Interpolation.EvaluateFunctionsAtGaussPoints(QuadratureForConsistentMass);
+			IReadOnlyList<Matrix> shapeGradientsNatural =
+				Interpolation.EvaluateNaturalGradientsAtGaussPoints(QuadratureForConsistentMass);
+
+			for (int gp = 0; gp < QuadratureForConsistentMass.IntegrationPoints.Count; ++gp)
+			{
+				Matrix shapeFunctionMatrix = BuildReShapedFunctionMatrix(shapeFunctions[gp]);
+				Matrix partial = shapeFunctionMatrix.MultiplyRight(shapeFunctionMatrix, true, false);
+				var jacobian = new IsoparametricJacobian3D(Nodes, shapeGradientsNatural[gp]);
+				double dA = jacobian.DirectDeterminant * QuadratureForConsistentMass.IntegrationPoints[gp].Weight;
+				mass.AxpyIntoThis(partial, dA);
+			}
+			mass.ScaleIntoThis(dynamicProperties.Density);
+			return mass;
+		}
+
+		private Matrix BuildReShapedFunctionMatrix(double[] shapeFunctions)
+		{
+			var shapeFunctionMatrix = Matrix.CreateZero(3, 3 * shapeFunctions.Length);
+			for (int i = 0; i < shapeFunctions.Length; i++)
+			{
+				shapeFunctionMatrix[0, 3 * i] = shapeFunctions[i];
+				shapeFunctionMatrix[1, (3 * i) + 1] = shapeFunctions[i];
+				shapeFunctionMatrix[2, (3 * i) + 2] = shapeFunctions[i];
+			}
+
+			return shapeFunctionMatrix;
+		}
+
+		public IMatrix DampingMatrix()
+		{
+			IMatrix damping = StiffnessMatrix();
+			damping.ScaleIntoThis(dynamicProperties.RayleighCoeffStiffness);
+			damping.AxpyIntoThis(MassMatrix(), dynamicProperties.RayleighCoeffMass);
+			return damping;
 		}
 		#endregion
 
 		public IEnumerable<IEnumerable<double>> InterpolateElementModelQuantities(IEnumerable<IElementModelQuantity<IStructuralDofType>> quantities, IEnumerable<double[]> coordinates) =>
 			throw new NotImplementedException();
-		public IEnumerable<double[]> IntegrateElementModelQuantities(IEnumerable<IElementModelQuantity<IStructuralDofType>> quantities) =>
-			throw new NotImplementedException();
+		public IEnumerable<double[]> IntegrateElementModelQuantities(IEnumerable<IElementModelQuantity<IStructuralDofType>> quantities)
+		{
+			int nodeCount = Nodes.Count;
+			int dofPerNodeCount = nodalDOFTypes.Length;
+			var volumeLoads = new double[nodeCount * dofPerNodeCount];
+			var qCount = quantities.Count();
+			if (quantities == null || qCount == 0)
+			{
+				return Enumerable.Empty<double[]>();
+			}
+
+			var integrals = Enumerable.Range(0, qCount).Select(x => new double[nodeCount * dofPerNodeCount]).ToArray();
+			IReadOnlyList<double[]> shapeFunctions = Interpolation.EvaluateFunctionsAtGaussPoints(QuadratureForStiffness);
+			IReadOnlyList<Matrix> shapeGradientsNatural = Interpolation.EvaluateNaturalGradientsAtGaussPoints(QuadratureForStiffness);
+			for (int gp = 0; gp < QuadratureForStiffness.IntegrationPoints.Count; ++gp)
+			{
+				Matrix shapeFunctionMatrix = BuildShapeFunctionMatrix(shapeFunctions[gp]).Transpose();
+				var jacobian = new IsoparametricJacobian3D(Nodes, shapeGradientsNatural[gp], 1e-20);
+				double dA = jacobian.DirectDeterminant * QuadratureForStiffness.IntegrationPoints[gp].Weight;
+
+				var gpCoordinates = GetGaussPointsCoordinates(gp);
+				int count = 0;
+				foreach (var quantity in quantities)
+				{
+					var currentIntegral = integrals[count];
+					int dofIndex = nodalDOFTypes.FindFirstIndex(quantity.DOF);
+					if (dofIndex >= 0)
+					{
+						var integral = shapeFunctionMatrix.Scale(dA * quantity.Amount(gpCoordinates)).CopyToArray2D();
+						for (int i = 0; i < nodeCount * dofPerNodeCount; i++)
+						{
+							currentIntegral[i] += integral[i, dofIndex];
+						}
+						//for (int i = 0; i < nodeCount; i++)
+						//{
+						//	//currentIntegral[dofPerNodeCount * i + dofIndex] += integral[i, 0];
+						//	currentIntegral[dofPerNodeCount * i + dofIndex] += integral[dofPerNodeCount * i + dofIndex, dofIndex];
+						//}
+					}
+
+					count++;
+				}
+			}
+
+			return integrals;
+		}
+
+		private Matrix BuildShapeFunctionMatrix(double[] shapeFunctions)
+		{
+			var shapeFunctionMatrix = Matrix.CreateZero(3, 3 * shapeFunctions.Length);
+			for (int i = 0; i < shapeFunctions.Length; i++)
+			{
+				shapeFunctionMatrix[0, 3 * i] = shapeFunctions[i];
+				shapeFunctionMatrix[1, 3 * i + 1] = shapeFunctions[i];
+				shapeFunctionMatrix[2, 3 * i + 2] = shapeFunctions[i];
+			}
+			return shapeFunctionMatrix;
+		}
+
+		private double[] GetGaussPointsCoordinates(int gpNo)
+		{
+			var shapeFunctionValues = Interpolation.EvaluateFunctionsAt(QuadratureForStiffness.IntegrationPoints[gpNo]);
+			double[] gpCoordinates = new double[3]; //{ dphi_dksi, dphi_dheta, dphi_dzeta}
+			for (int i1 = 0; i1 < shapeFunctionValues.Length; i1++)
+			{
+				gpCoordinates[0] += shapeFunctionValues[i1] * Nodes[i1].X;
+				gpCoordinates[1] += shapeFunctionValues[i1] * Nodes[i1].Y;
+				gpCoordinates[2] += shapeFunctionValues[i1] * Nodes[i1].Z;
+			}
+
+			return gpCoordinates;
+		}
 	}
 }
