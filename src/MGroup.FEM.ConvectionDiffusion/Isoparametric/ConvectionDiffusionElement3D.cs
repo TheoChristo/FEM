@@ -118,7 +118,6 @@ namespace MGroup.FEM.ConvectionDiffusion.Isoparametric
 			}
 			
 			capacity.ScaleIntoThis(material.CapacityCoeff);
-			capacity.MatrixSymmetry = LinearAlgebra.Providers.MatrixSymmetry.Symmetric;
 			return capacity;
 		}
 
@@ -148,7 +147,6 @@ namespace MGroup.FEM.ConvectionDiffusion.Isoparametric
 				double dA = jacobian.DirectDeterminant * QuadratureForStiffness.IntegrationPoints[gp].Weight;
 				diffusion.AxpyIntoThis(partialK, dA * material.DiffusionCoeff);
 			}
-			diffusion.MatrixSymmetry = LinearAlgebra.Providers.MatrixSymmetry.Symmetric;
 
 			return diffusion;
 		}
@@ -210,7 +208,6 @@ namespace MGroup.FEM.ConvectionDiffusion.Isoparametric
 			}
 
 			production.ScaleIntoThis(material.DependentSourceCoeff * (-1d));
-			production.MatrixSymmetry = LinearAlgebra.Providers.MatrixSymmetry.Symmetric;
 			return production;
 		}
 	    public Matrix BuildNonLinearProductionMatrix()
@@ -239,7 +236,6 @@ namespace MGroup.FEM.ConvectionDiffusion.Isoparametric
 			}
 
 			//production.ScaleIntoThis(material.DependentSourceCoeff * (-1d));
-			production.MatrixSymmetry = LinearAlgebra.Providers.MatrixSymmetry.Symmetric;
 			return production;
 		}
 		public double[] BuildProductionVector()
@@ -327,7 +323,39 @@ namespace MGroup.FEM.ConvectionDiffusion.Isoparametric
 			//UpdatePressureAndGradients(localDisplacements);
 
 			return difConvResponseVector.Add(productionResponseVector);
+
+
 		}
+
+		//private void UpdatePressureAndGradients(double[] localDisplacements)
+		//{
+		//	IReadOnlyList<Matrix> shapeFunctionNaturalDerivatives;
+		//	shapeFunctionNaturalDerivatives = Interpolation.EvaluateNaturalGradientsAtGaussPoints(QuadratureForConsistentMass);
+		//	var jacobians = shapeFunctionNaturalDerivatives.Select(x => new IsoparametricJacobian3D(Nodes, x));
+		//	Matrix[] jacobianInverse = jacobians.Select(x => x.InverseMatrix.Transpose()).ToArray();
+		//	for (int gp = 0; gp < QuadratureForConsistentMass.IntegrationPoints.Count; ++gp)
+		//	{
+		//		double[] dphi_dnatural = new double[3]; //{ dphi_dksi, dphi_dheta, dphi_dzeta}
+		//		for (int i1 = 0; i1 < shapeFunctionNaturalDerivatives[gp].NumRows; i1++)
+		//		{
+		//			dphi_dnatural[0] += shapeFunctionNaturalDerivatives[gp][i1,0] * localDisplacements[i1];
+		//			dphi_dnatural[1] += shapeFunctionNaturalDerivatives[gp][i1, 1] * localDisplacements[i1];
+		//			dphi_dnatural[2] += shapeFunctionNaturalDerivatives[gp][i1, 2] * localDisplacements[i1];
+		//		}
+
+		//		var dphi_dnaturalMAT = Matrix.CreateFromArray(dphi_dnatural, 1,3);
+
+		//		var dphi_dcartesian = dphi_dnaturalMAT * jacobianInverse[gp].Transpose();
+
+		//		pressureTensorDivergenceAtGaussPoints[gp] = new double[3] { dphi_dcartesian[0, 0], dphi_dcartesian[0, 1], dphi_dcartesian[0, 2] };
+
+				
+
+
+		//	}
+		//}
+
+		
 
 		public double[] CalculateProductionRepsonse()
 		{
@@ -335,6 +363,16 @@ namespace MGroup.FEM.ConvectionDiffusion.Isoparametric
 			{ return ProductionMatrix().Multiply(localDisplacements); }
 			else { return CalculateNonLinearProductionRepsonse(); }
 		}
+
+		//public double ProductionFunction(double phi)
+		//{
+		//	return material.DependentSourceCoeff * phi;
+		//}
+
+		//public double ProductionFunctionDerivative(double phi)
+		//{
+		//	return material.DependentSourceCoeff;
+		//}
 
 		private double[] CalculateNonLinearProductionRepsonse()
 		{
