@@ -15,7 +15,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\..\MSolve.Constitutive\src\MGroup.Constitutive.ConvectionDiffusion\MGroup.Constitutive.ConvectionDiffusion.csproj" />
+    <ProjectReference Include="..\..\..\Constitutive\src\MGroup.Constitutive.ConvectionDiffusion\MGroup.Constitutive.ConvectionDiffusion.csproj" />
     <ProjectReference Include="..\MGroup.FEM\MGroup.FEM.csproj" />
   </ItemGroup>
 
